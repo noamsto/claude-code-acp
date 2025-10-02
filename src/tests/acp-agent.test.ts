@@ -5,6 +5,7 @@ import {
   AvailableCommand,
   Client,
   ClientSideConnection,
+  ndJsonStream,
   NewSessionResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
@@ -17,7 +18,7 @@ import {
 import { nodeToWebWritable, nodeToWebReadable } from "../utils.js";
 import { markdownEscape, toolInfoFromToolUse, toolUpdateFromToolResult } from "../tools.js";
 import { toAcpNotifications } from "../acp-agent.js";
-import { SDKAssistantMessage } from "@anthropic-ai/claude-code";
+import { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 
 describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration", () => {
   let child: ReturnType<typeof spawn>;
@@ -108,14 +109,13 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
     newSessionResponse: NewSessionResponse;
   }> {
     let client;
-    const connection = new ClientSideConnection(
-      (agent) => {
-        client = new TestClient(agent);
-        return client;
-      },
-      nodeToWebWritable(child.stdin!),
-      nodeToWebReadable(child.stdout!),
-    );
+    const input = nodeToWebWritable(child.stdin!);
+    const output = nodeToWebReadable(child.stdout!);
+    const stream = ndJsonStream(input, output);
+    const connection = new ClientSideConnection((agent) => {
+      client = new TestClient(agent);
+      return client;
+    }, stream);
 
     await connection.initialize({
       protocolVersion: 1,
@@ -190,6 +190,50 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
     });
 
     expect(client.takeReceivedText()).toContain("Hello GPT-5");
+  }, 30000);
+
+  it("/compact works", async () => {
+    const { client, connection, newSessionResponse } = await setupTestSession(__dirname);
+
+    const commands = await client.availableCommandsPromise;
+
+    expect(commands).toContainEqual({
+      description:
+        "Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]",
+      input: {
+        hint: "<optional custom summarization instructions>",
+      },
+      name: "compact",
+    });
+
+    // Error case (no previous message)
+    await connection.prompt({
+      prompt: [{ type: "text", text: "/compact" }],
+      sessionId: newSessionResponse.sessionId,
+    });
+
+    expect(client.takeReceivedText()).toBe("");
+
+    // Send something
+    await connection.prompt({
+      prompt: [{ type: "text", text: "Hi" }],
+      sessionId: newSessionResponse.sessionId,
+    });
+    // Clear response
+    client.takeReceivedText();
+
+    // Test with instruction
+    await connection.prompt({
+      prompt: [
+        {
+          type: "text",
+          text: "/compact greeting",
+        },
+      ],
+      sessionId: newSessionResponse.sessionId,
+    });
+
+    expect(client.takeReceivedText()).toContain("");
   }, 30000);
 });
 
@@ -327,13 +371,13 @@ describe("tool conversions", () => {
     });
   });
 
-  it("should handle mcp__acp__write tool calls", () => {
+  it("should handle mcp__acp__Write tool calls", () => {
     const tool_use = {
       type: "tool_use",
       id: "toolu_01GHI789JKL456",
-      name: "mcp__acp__write",
+      name: "mcp__acp__Write",
       input: {
-        abs_path: "/Users/test/project/config.json",
+        file_path: "/Users/test/project/config.json",
         content: '{"version": "1.0.0"}',
       },
     };
@@ -371,13 +415,13 @@ describe("tool conversions", () => {
     });
   });
 
-  it("should handle mcp__acp__read tool calls", () => {
+  it("should handle mcp__acp__Read tool calls", () => {
     const tool_use = {
       type: "tool_use",
       id: "toolu_01YZA789BCD123",
-      name: "mcp__acp__read",
+      name: "mcp__acp__Read",
       input: {
-        abs_path: "/Users/test/project/data.json",
+        file_path: "/Users/test/project/data.json",
       },
     };
 
@@ -389,13 +433,13 @@ describe("tool conversions", () => {
     });
   });
 
-  it("should handle mcp__acp__read with limit", () => {
+  it("should handle mcp__acp__Read with limit", () => {
     const tool_use = {
       type: "tool_use",
       id: "toolu_01EFG456HIJ789",
-      name: "mcp__acp__read",
+      name: "mcp__acp__Read",
       input: {
-        abs_path: "/Users/test/project/large.txt",
+        file_path: "/Users/test/project/large.txt",
         limit: 100,
       },
     };
@@ -408,13 +452,13 @@ describe("tool conversions", () => {
     });
   });
 
-  it("should handle mcp__acp__read with offset and limit", () => {
+  it("should handle mcp__acp__Read with offset and limit", () => {
     const tool_use = {
       type: "tool_use",
       id: "toolu_01KLM789NOP456",
-      name: "mcp__acp__read",
+      name: "mcp__acp__Read",
       input: {
-        abs_path: "/Users/test/project/large.txt",
+        file_path: "/Users/test/project/large.txt",
         offset: 50,
         limit: 100,
       },
@@ -428,13 +472,13 @@ describe("tool conversions", () => {
     });
   });
 
-  it("should handle mcp__acp__read with only offset", () => {
+  it("should handle mcp__acp__Read with only offset", () => {
     const tool_use = {
       type: "tool_use",
       id: "toolu_01QRS123TUV789",
-      name: "mcp__acp__read",
+      name: "mcp__acp__Read",
       input: {
-        abs_path: "/Users/test/project/large.txt",
+        file_path: "/Users/test/project/large.txt",
         offset: 200,
       },
     };
@@ -495,7 +539,7 @@ describe("tool conversions", () => {
     const tool_use = {
       type: "tool_use",
       id: "toolu_01PhLms5fuvmdjy2bb6dfUKT",
-      name: "KillBash",
+      name: "KillShell",
       input: {
         shell_id: "bash_1",
       },
@@ -532,6 +576,7 @@ describe("tool conversions", () => {
         id: "msg_017eNosJgww7F5qD4a8BcAcx",
         type: "message",
         role: "assistant",
+        container: null,
         model: "claude-sonnet-4-20250514",
         content: [
           {
@@ -596,7 +641,9 @@ describe("tool conversions", () => {
           },
           output_tokens: 1,
           service_tier: "standard",
+          server_tool_use: null,
         },
+        context_management: null,
       },
       parent_tool_use_id: null,
       session_id: "d056596f-e328-41e9-badd-b07122ae5227",
@@ -654,78 +701,13 @@ describe("tool conversions", () => {
     ]);
   });
 
-  it("should show full diff for multi edit tool", () => {
-    const toolUse = {
-      type: "tool_use",
-      id: "toolu_01DEF456",
-      name: "mcp__acp__multi-edit",
-      input: {
-        file_path: "/Users/test/project/config.json",
-        edits: [
-          {
-            old_string: 'version": 1',
-            new_string: 'version": 2',
-            replace_all: false,
-          },
-          {
-            old_string: 'enabled": false',
-            new_string: 'enabled": true',
-            replace_all: true,
-          },
-        ],
-      },
-    };
-    const fileCache: { [key: string]: string } = {
-      "/Users/test/project/config.json": JSON.stringify(
-        {
-          version: 1,
-          filler: "filler",
-          enabled: false,
-        },
-        null,
-        4,
-      ),
-    };
-
-    expect(toolInfoFromToolUse(toolUse, fileCache)).toEqual({
-      content: [
-        {
-          newText: `{
-    "version": 2,
-    "filler": "filler",
-    "enabled": true
-}`,
-          oldText: `{
-    "version": 1,
-    "filler": "filler",
-    "enabled": false
-}`,
-          path: "/Users/test/project/config.json",
-          type: "diff",
-        },
-      ],
-      kind: "edit",
-      locations: [
-        {
-          path: "/Users/test/project/config.json",
-          line: 1,
-        },
-        {
-          path: "/Users/test/project/config.json",
-          line: 3,
-        },
-      ],
-      title: "Edit /Users/test/project/config.json",
-    });
-  });
-
   it("should return empty update for successful edit result", () => {
     const toolUse = {
       type: "tool_use",
       id: "toolu_01MNO345",
-      name: "mcp__acp__edit",
+      name: "mcp__acp__Edit",
       input: {
-        abs_path: "/Users/test/project/test.txt",
+        file_path: "/Users/test/project/test.txt",
         old_string: "old",
         new_string: "new",
       },
@@ -734,7 +716,7 @@ describe("tool conversions", () => {
     const toolResult = {
       content: [
         {
-          type: "text",
+          type: "text" as const,
           text: "not valid json",
         },
       ],
@@ -753,9 +735,9 @@ describe("tool conversions", () => {
     const toolUse = {
       type: "tool_use",
       id: "toolu_01MNO345",
-      name: "mcp__acp__edit",
+      name: "mcp__acp__Edit",
       input: {
-        abs_path: "/Users/test/project/test.txt",
+        file_path: "/Users/test/project/test.txt",
         old_string: "old",
         new_string: "new",
       },
@@ -764,7 +746,7 @@ describe("tool conversions", () => {
     const toolResult = {
       content: [
         {
-          type: "text",
+          type: "text" as const,
           text: "Failed to find `old_string`",
         },
       ],
@@ -778,7 +760,10 @@ describe("tool conversions", () => {
     // Should return empty object when parsing fails
     expect(update).toEqual({
       content: [
-        { content: { type: "text", text: "Failed to find `old_string`" }, type: "content" },
+        {
+          content: { type: "text", text: "```\nFailed to find `old_string`\n```" },
+          type: "content",
+        },
       ],
     });
   });

@@ -5,6 +5,7 @@ import {
   ToolKind,
 } from "@zed-industries/agent-client-protocol";
 import { replaceAndCalculateLocation, SYSTEM_REMINDER, toolNames } from "./mcp-server.js";
+import { ToolResultBlockParam } from "@anthropic-ai/sdk/resources";
 
 interface ToolInfo {
   title: string;
@@ -90,8 +91,8 @@ export function toolInfoFromToolUse(
         content: [],
       };
 
-    case "KillBash":
-    case toolNames.killBash:
+    case "KillShell":
+    case toolNames.killShell:
       return {
         title: "Kill Process",
         kind: "execute",
@@ -107,11 +108,11 @@ export function toolInfoFromToolUse(
         limit = " (from line " + (input.offset + 1) + ")";
       }
       return {
-        title: "Read " + (input.abs_path ?? "File") + limit,
+        title: "Read " + (input.file_path ?? "File") + limit,
         kind: "read",
         locations: [
           {
-            path: input.abs_path,
+            path: input.file_path,
             line: input.offset ?? 0,
           },
         ],
@@ -137,7 +138,7 @@ export function toolInfoFromToolUse(
 
     case toolNames.edit:
     case "Edit": {
-      const path = input?.abs_path ?? input?.file_path;
+      const path = input?.file_path ?? input?.file_path;
       let oldText = input.old_string ?? null;
       let newText = input.new_string ?? "";
       let affectedLines: number[] = [];
@@ -181,66 +182,13 @@ export function toolInfoFromToolUse(
       };
     }
 
-    case toolNames.multiEdit:
-    case "MultiEdit": {
-      const multiInput = input as {
-        file_path: string;
-        edits: {
-          old_string: string;
-          new_string: string;
-          replace_all?: boolean;
-        }[];
-      };
-      let oldTextMulti = multiInput.edits.map((edit: any) => edit.old_string).join("\n");
-      let newTextMulti = multiInput.edits.map((edit: any) => edit.new_string).join("\n");
-      let affectedLines: number[] = [];
-      try {
-        if (multiInput.edits && multiInput.file_path) {
-          const oldContent =
-            cachedFileContent[multiInput.file_path] ||
-            multiInput.edits.map((edit: any) => edit.oldText).join("\n");
-          const newContent = replaceAndCalculateLocation(
-            oldContent,
-            multiInput.edits.map((edit) => ({
-              oldText: edit.old_string,
-              newText: edit.new_string,
-              replaceAll: edit.replace_all,
-            })),
-          );
-          oldTextMulti = oldContent;
-          newTextMulti = newContent.newContent;
-          affectedLines = newContent.lineNumbers;
-        }
-      } catch (e) {
-        console.error(e);
-      }
-      // Display it as a normal edit, because end users don't care about
-      // the distinction between edits and multi-edits.
-      return {
-        title: input?.file_path ? `Edit ${input.file_path}` : "Edit",
-        kind: "edit",
-        content: [
-          {
-            type: "diff" as const,
-            path: input.file_path,
-            oldText: oldTextMulti,
-            newText: newTextMulti,
-          },
-        ],
-        locations: input?.file_path
-          ? affectedLines.length > 0
-            ? affectedLines.map((line) => ({ line, path: input.file_path }))
-            : [{ path: input.file_path }]
-          : [],
-      };
-    }
     case toolNames.write: {
       let content: ToolCallContent[] = [];
-      if (input && input.abs_path) {
+      if (input && input.file_path) {
         content = [
           {
             type: "diff",
-            path: input.abs_path,
+            path: input.file_path,
             oldText: null,
             newText: input.content,
           },
@@ -254,10 +202,10 @@ export function toolInfoFromToolUse(
         ];
       }
       return {
-        title: input?.abs_path ? `Write ${input.abs_path}` : "Write",
+        title: input?.file_path ? `Write ${input.file_path}` : "Write",
         kind: "edit",
         content,
-        locations: input?.abs_path ? [{ path: input.abs_path }] : [],
+        locations: input?.file_path ? [{ path: input.file_path }] : [],
       };
     }
 
@@ -410,7 +358,13 @@ export function toolInfoFromToolUse(
             : [],
       };
 
-    case "Other":
+    case "Other": {
+      let output;
+      try {
+        output = JSON.stringify(input, null, 2);
+      } catch {
+        output = typeof input === "string" ? input : "{}";
+      }
       return {
         title: name || "Unknown Tool",
         kind: "other",
@@ -419,11 +373,12 @@ export function toolInfoFromToolUse(
             type: "content",
             content: {
               type: "text",
-              text: `\`\`\`json\n${JSON.stringify(input, null, 2) || "{}"}\`\`\``,
+              text: `\`\`\`json\n${output}\`\`\``,
             },
           },
         ],
       };
+    }
 
     default:
       return {
@@ -434,15 +389,8 @@ export function toolInfoFromToolUse(
   }
 }
 
-type ToolResult = {
-  type: "tool_result";
-  content: any;
-  tool_use_id: string;
-  is_error: boolean;
-};
-
 export function toolUpdateFromToolResult(
-  toolResult: ToolResult,
+  toolResult: ToolResultBlockParam,
   toolUse: any | undefined,
 ): ToolUpdate {
   switch (toolUse?.name) {
@@ -480,14 +428,11 @@ export function toolUpdateFromToolResult(
     case "edit":
     case "Edit":
     case toolNames.edit:
-    case toolNames.multiEdit:
-    case "multi-edit":
-    case "MultiEdit":
     case toolNames.write:
     case "Write": {
-      if (toolResult.is_error && toolResult.content?.length > 0) {
+      if (toolResult.is_error && toolResult.content && toolResult.content.length > 0) {
         // Only return errors
-        return toAcpContentUpdate(toolResult.content);
+        return toAcpContentUpdate(toolResult.content, true);
       }
       return {};
     }
@@ -511,17 +456,26 @@ export function toolUpdateFromToolResult(
     case "WebSearch":
     case "Other":
     default: {
-      return toAcpContentUpdate(toolResult.content);
+      return toAcpContentUpdate(toolResult.content, toolResult.is_error);
     }
   }
 }
 
-function toAcpContentUpdate(content: any): { content?: ToolCallContent[] } {
+function toAcpContentUpdate(
+  content: any,
+  isError: boolean = false,
+): { content?: ToolCallContent[] } {
   if (Array.isArray(content) && content.length > 0) {
     return {
       content: content.map((content: any) => ({
         type: "content",
-        content,
+        content:
+          isError && content.type === "text"
+            ? {
+                ...content,
+                text: `\`\`\`\n${content.text}\n\`\`\``,
+              }
+            : content,
       })),
     };
   } else if (typeof content === "string" && content.length > 0) {
@@ -531,7 +485,7 @@ function toAcpContentUpdate(content: any): { content?: ToolCallContent[] } {
           type: "content",
           content: {
             type: "text",
-            text: content,
+            text: isError ? `\`\`\`\n${content}\n\`\`\`` : content,
           },
         },
       ],
@@ -540,7 +494,7 @@ function toAcpContentUpdate(content: any): { content?: ToolCallContent[] } {
   return {};
 }
 
-type ClaudePlanEntry = {
+export type ClaudePlanEntry = {
   content: string;
   status: "pending" | "in_progress" | "completed";
   activeForm: string;

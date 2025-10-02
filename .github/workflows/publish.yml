@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: release # Optional: for enhanced security
     permissions:
       contents: read
       id-token: write
@@ -16,8 +17,8 @@ jobs:
         with:
           node-version: "lts/*"
           registry-url: "https://registry.npmjs.org"
+      - name: Update npm
+        run: npm install -g npm@latest
       - run: npm ci
-        # Add back provenance once repo is public
-      - run: npm publish # --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm run build
+      - run: npm publish
